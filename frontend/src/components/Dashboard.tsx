@@ -1,6 +1,6 @@
-import { useState } from 'react'
-import { Layout, Tabs, Statistic, Row, Col, Card, Tag, Button, Input, Table, Drawer, Descriptions, Space, Progress } from 'antd'
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts'
+import { useState, useMemo, useRef, useEffect } from 'react'
+import { Layout, Tabs, Statistic, Row, Col, Card, Tag, Button, Input, Table, Drawer, Descriptions, Space, Progress, Tooltip } from 'antd'
+import { LineChart, Line, XAxis, YAxis, Tooltip as RechartsTooltip, ResponsiveContainer, AreaChart, Area } from 'recharts'
 import { useTaskStore } from '../store/tasks'
 import type { Task, TaskStatus } from '../types'
 
@@ -10,10 +10,49 @@ const STATUS_COLORS: Record<TaskStatus, string> = {
   pending: 'default', running: 'processing', success: 'success', failed: 'error', retry: 'warning'
 }
 
+const LOG_LEVEL_COLORS: Record<string, string> = {
+  INFO: '#61afef',
+  WARN: '#e5c07b',
+  ERROR: '#e06c75',
+  FATAL: '#ff4d4f',
+  DEBUG: '#98c379',
+}
+
+function escapeRegExp(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function getLogLevel(line: string): string {
+  const match = line.match(/\[(INFO|WARN|ERROR|FATAL|DEBUG)\]/)
+  return match ? match[1] : 'INFO'
+}
+
+function highlightText(text: string, keyword: string): React.ReactNode[] {
+  if (!keyword.trim()) return [text]
+  const kw = keyword.trim()
+  const regex = new RegExp(`(${escapeRegExp(kw)})`, 'gi')
+  const parts = text.split(regex)
+  return parts.map((part, i) =>
+    part.toLowerCase() === kw.toLowerCase() ? (
+      <span key={i} style={{ background: '#ffd666', color: '#000', padding: '0 2px', borderRadius: 2 }}>
+        {part}
+      </span>
+    ) : (
+      <span key={i}>{part}</span>
+    )
+  )
+}
+
 export default function Dashboard() {
   const store = useTaskStore()
   const [newTaskName, setNewTaskName] = useState('')
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [searchKeyword, setSearchKeyword] = useState('')
+  const [currentErrorIndex, setCurrentErrorIndex] = useState(0)
+  const [currentMatchIndex, setCurrentMatchIndex] = useState(0)
+  const logContainerRef = useRef<HTMLPreElement>(null)
+  const errorLineRefs = useRef<(HTMLDivElement | null)[]>([])
+  const matchedLineRefs = useRef<(HTMLDivElement | null)[]>([])
 
   const taskColumns = [
     { title: 'ID', dataIndex: 'id', key: 'id', width: 100 },
@@ -26,7 +65,7 @@ export default function Dashboard() {
       <Space>
         {r.status === 'failed' && <Button size="small" type="primary" onClick={() => store.retryTask(r.id)}>重试</Button>}
         {r.status === 'running' && <Button size="small" danger onClick={() => store.cancelTask(r.id)}>取消</Button>}
-        <Button size="small" onClick={() => { store.selectTask(r); setDrawerOpen(true) }}>详情</Button>
+        <Button size="small" onClick={() => { store.selectTask(r); setDrawerOpen(true); setSearchKeyword(''); setCurrentErrorIndex(0); setCurrentMatchIndex(0) }}>详情</Button>
       </Space>
     )},
   ]
@@ -34,6 +73,99 @@ export default function Dashboard() {
   const successCount = store.tasks.filter(t => t.status === 'success').length
   const failedCount = store.tasks.filter(t => t.status === 'failed').length
   const runningCount = store.tasks.filter(t => t.status === 'running').length
+
+  const errorLineIndices = useMemo(() => {
+    if (!store.selectedTask) return []
+    return store.selectedTask.logs
+      .map((line, idx) => {
+        const level = getLogLevel(line)
+        return (level === 'ERROR' || level === 'FATAL') ? idx : -1
+      })
+      .filter(idx => idx !== -1)
+  }, [store.selectedTask])
+
+  const warningLineIndices = useMemo(() => {
+    if (!store.selectedTask) return []
+    return store.selectedTask.logs
+      .map((line, idx) => getLogLevel(line) === 'WARN' ? idx : -1)
+      .filter(idx => idx !== -1)
+  }, [store.selectedTask])
+
+  const matchedLineIndices = useMemo(() => {
+    if (!store.selectedTask || !searchKeyword.trim()) return []
+    const kw = searchKeyword.trim().toLowerCase()
+    return store.selectedTask.logs
+      .map((line, idx) => line.toLowerCase().includes(kw) ? idx : -1)
+      .filter(idx => idx !== -1)
+  }, [store.selectedTask, searchKeyword])
+
+  const scrollToLine = (lineIndex: number) => {
+    if (logContainerRef.current && errorLineRefs.current[lineIndex]) {
+      errorLineRefs.current[lineIndex]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+  }
+
+  const goToPrevError = () => {
+    if (errorLineIndices.length === 0) return
+    const newIndex = currentErrorIndex === 0 ? errorLineIndices.length - 1 : currentErrorIndex - 1
+    setCurrentErrorIndex(newIndex)
+    scrollToLine(errorLineIndices[newIndex])
+  }
+
+  const goToNextError = () => {
+    if (errorLineIndices.length === 0) return
+    const newIndex = currentErrorIndex === errorLineIndices.length - 1 ? 0 : currentErrorIndex + 1
+    setCurrentErrorIndex(newIndex)
+    scrollToLine(errorLineIndices[newIndex])
+  }
+
+  const goToFirstError = () => {
+    if (errorLineIndices.length === 0) return
+    setCurrentErrorIndex(0)
+    scrollToLine(errorLineIndices[0])
+  }
+
+  const scrollToMatchedLine = (lineIndex: number) => {
+    if (logContainerRef.current && matchedLineRefs.current[lineIndex]) {
+      matchedLineRefs.current[lineIndex]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+  }
+
+  const goToPrevMatch = () => {
+    if (matchedLineIndices.length === 0) return
+    const newIndex = currentMatchIndex === 0 ? matchedLineIndices.length - 1 : currentMatchIndex - 1
+    setCurrentMatchIndex(newIndex)
+    scrollToMatchedLine(newIndex)
+  }
+
+  const goToNextMatch = () => {
+    if (matchedLineIndices.length === 0) return
+    const newIndex = currentMatchIndex === matchedLineIndices.length - 1 ? 0 : currentMatchIndex + 1
+    setCurrentMatchIndex(newIndex)
+    scrollToMatchedLine(newIndex)
+  }
+
+  const goToFirstMatch = () => {
+    if (matchedLineIndices.length === 0) return
+    setCurrentMatchIndex(0)
+    scrollToMatchedLine(0)
+  }
+
+  useEffect(() => {
+    if (searchKeyword.trim() && matchedLineIndices.length > 0) {
+      setCurrentMatchIndex(0)
+    } else {
+      setCurrentMatchIndex(0)
+    }
+  }, [searchKeyword, matchedLineIndices])
+
+  useEffect(() => {
+    if (drawerOpen && errorLineIndices.length > 0) {
+      setTimeout(() => {
+        scrollToLine(errorLineIndices[0])
+      }, 100)
+    }
+  }, [drawerOpen, errorLineIndices])
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
@@ -64,7 +196,7 @@ export default function Dashboard() {
                     <AreaChart data={store.metrics}>
                       <XAxis dataKey="time" tickFormatter={t => new Date(t).toLocaleTimeString()} fontSize={10} />
                       <YAxis fontSize={10} />
-                      <Tooltip labelFormatter={t => new Date(t as number).toLocaleString()} />
+                      <RechartsTooltip labelFormatter={t => new Date(t as number).toLocaleString()} />
                       <Area type="monotone" dataKey="runningTasks" stroke="#1890ff" fill="#1890ff" fillOpacity={0.3} />
                     </AreaChart>
                   </ResponsiveContainer>
@@ -76,7 +208,7 @@ export default function Dashboard() {
                     <LineChart data={store.metrics}>
                       <XAxis dataKey="time" tickFormatter={t => new Date(t).toLocaleTimeString()} fontSize={10} />
                       <YAxis domain={[0, 100]} fontSize={10} />
-                      <Tooltip labelFormatter={t => new Date(t as number).toLocaleString()} />
+                      <RechartsTooltip labelFormatter={t => new Date(t as number).toLocaleString()} />
                       <Line type="monotone" dataKey="successRate" stroke="#52c41a" strokeWidth={2} dot={false} />
                     </LineChart>
                   </ResponsiveContainer>
@@ -88,7 +220,7 @@ export default function Dashboard() {
                     <AreaChart data={store.metrics}>
                       <XAxis dataKey="time" tickFormatter={t => new Date(t).toLocaleTimeString()} fontSize={10} />
                       <YAxis fontSize={10} />
-                      <Tooltip />
+                      <RechartsTooltip />
                       <Area type="monotone" dataKey="avgLatency" stroke="#faad14" fill="#faad14" fillOpacity={0.2} />
                     </AreaChart>
                   </ResponsiveContainer>
@@ -118,21 +250,154 @@ export default function Dashboard() {
         ]} />
 
         {/* Task Detail Drawer */}
-        <Drawer title="任务详情" open={drawerOpen} onClose={() => setDrawerOpen(false)} width={480}>
+        <Drawer title="任务详情" open={drawerOpen} onClose={() => setDrawerOpen(false)} width={720}>
           {store.selectedTask && (
             <>
-              <Descriptions column={1} bordered size="small">
+              <Descriptions column={2} bordered size="small">
                 <Descriptions.Item label="ID">{store.selectedTask.id}</Descriptions.Item>
                 <Descriptions.Item label="名称">{store.selectedTask.name}</Descriptions.Item>
                 <Descriptions.Item label="状态"><Tag color={STATUS_COLORS[store.selectedTask.status]}>{store.selectedTask.status}</Tag></Descriptions.Item>
                 <Descriptions.Item label="执行节点">{store.selectedTask.node}</Descriptions.Item>
                 <Descriptions.Item label="重试次数">{store.selectedTask.retries}/{store.selectedTask.maxRetries}</Descriptions.Item>
-                <Descriptions.Item label="创建时间">{new Date(store.selectedTask.createdAt).toLocaleString()}</Descriptions.Item>
                 <Descriptions.Item label="耗时">{store.selectedTask.duration ? `${(store.selectedTask.duration / 1000).toFixed(1)}s` : '-'}</Descriptions.Item>
+                <Descriptions.Item label="创建时间" span={2}>{new Date(store.selectedTask.createdAt).toLocaleString()}</Descriptions.Item>
               </Descriptions>
-              <h4 style={{ marginTop: 16 }}>执行日志</h4>
-              <pre style={{ background: '#1f1f1f', padding: 12, borderRadius: 8, fontSize: 12, maxHeight: 300, overflow: 'auto' }}>
-                {store.selectedTask.logs.join('\n')}
+
+              <div style={{ marginTop: 16, marginBottom: 8 }}>
+                <Space style={{ marginBottom: 8, width: '100%', justifyContent: 'space-between' }}>
+                  <h4 style={{ margin: 0 }}>执行日志</h4>
+                  <Space size="small">
+                    <Tag color="error">错误: {errorLineIndices.length}</Tag>
+                    <Tag color="warning">警告: {warningLineIndices.length}</Tag>
+                    {searchKeyword.trim() && <Tag color="processing">匹配: {matchedLineIndices.length}</Tag>}
+                  </Space>
+                </Space>
+
+                <Space.Compact style={{ width: '100%', marginBottom: 8 }}>
+                  <Input
+                    placeholder="搜索关键词，支持高亮显示..."
+                    value={searchKeyword}
+                    onChange={e => {
+                      setSearchKeyword(e.target.value)
+                      setCurrentErrorIndex(0)
+                      setCurrentMatchIndex(0)
+                    }}
+                    onClear={() => {
+                      setSearchKeyword('')
+                      setCurrentMatchIndex(0)
+                    }}
+                    allowClear
+                    prefix={<span>🔍</span>}
+                  />
+                  {searchKeyword.trim() && (
+                    <>
+                      <Tooltip title="跳转到第一个匹配">
+                        <Button icon="⏮" onClick={goToFirstMatch} disabled={matchedLineIndices.length === 0} />
+                      </Tooltip>
+                      <Tooltip title="上一个匹配">
+                        <Button icon="⬆" onClick={goToPrevMatch} disabled={matchedLineIndices.length === 0} />
+                      </Tooltip>
+                      <Tooltip title="下一个匹配">
+                        <Button icon="⬇" onClick={goToNextMatch} disabled={matchedLineIndices.length === 0} />
+                      </Tooltip>
+                    </>
+                  )}
+                  <Tooltip title="跳转到第一个错误">
+                    <Button icon="⏮" onClick={goToFirstError} disabled={errorLineIndices.length === 0} />
+                  </Tooltip>
+                  <Tooltip title="上一个错误">
+                    <Button icon="⬆" onClick={goToPrevError} disabled={errorLineIndices.length === 0} />
+                  </Tooltip>
+                  <Tooltip title="下一个错误">
+                    <Button icon="⬇" onClick={goToNextError} disabled={errorLineIndices.length === 0} />
+                  </Tooltip>
+                </Space.Compact>
+
+                {(errorLineIndices.length > 0 || matchedLineIndices.length > 0) && (
+                  <div style={{ fontSize: 12, color: '#888', marginBottom: 8 }}>
+                    {errorLineIndices.length > 0 && (
+                      <>
+                        当前错误: {currentErrorIndex + 1} / {errorLineIndices.length} &nbsp;|&nbsp;
+                        <a onClick={goToFirstError} style={{ cursor: 'pointer' }}>跳转到首个错误</a>
+                      </>
+                    )}
+                    {matchedLineIndices.length > 0 && searchKeyword.trim() && (
+                      <>
+                        {errorLineIndices.length > 0 && <>&nbsp;&nbsp;</>}
+                        当前匹配: {currentMatchIndex + 1} / {matchedLineIndices.length} &nbsp;|&nbsp;
+                        <a onClick={goToFirstMatch} style={{ cursor: 'pointer' }}>跳转到首个匹配</a>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <pre
+                ref={logContainerRef}
+                style={{
+                  background: '#1f1f1f',
+                  padding: 0,
+                  borderRadius: 8,
+                  fontSize: 12,
+                  maxHeight: 450,
+                  overflow: 'auto',
+                  margin: 0,
+                  fontFamily: '"SF Mono", Monaco, Menlo, Consolas, monospace',
+                }}
+              >
+                {store.selectedTask.logs.map((line, idx) => {
+                  const level = getLogLevel(line)
+                  const color = LOG_LEVEL_COLORS[level] || '#abb2bf'
+                  const isError = level === 'ERROR' || level === 'FATAL'
+                  const isWarning = level === 'WARN'
+                  const isCurrentError = isError && errorLineIndices[currentErrorIndex] === idx
+                  const isMatched = searchKeyword.trim() && line.toLowerCase().includes(searchKeyword.trim().toLowerCase())
+                  const matchIdx = isMatched ? matchedLineIndices.indexOf(idx) : -1
+                  const isCurrentMatch = matchIdx !== -1 && currentMatchIndex === matchIdx
+
+                  return (
+                    <div
+                      key={idx}
+                      ref={(el) => {
+                        if (isError) errorLineRefs.current[errorLineIndices.indexOf(idx)] = el
+                        if (isMatched) matchedLineRefs.current[matchIdx] = el
+                      }}
+                      style={{
+                        padding: '2px 12px',
+                        display: 'flex',
+                        alignItems: 'flex-start',
+                        gap: 8,
+                        background: isCurrentMatch
+                          ? 'rgba(255, 214, 102, 0.35)'
+                          : isCurrentError
+                          ? 'rgba(255, 77, 79, 0.25)'
+                          : isMatched
+                          ? 'rgba(255, 214, 102, 0.15)'
+                          : isError
+                          ? 'rgba(255, 77, 79, 0.08)'
+                          : isWarning
+                          ? 'rgba(229, 192, 123, 0.06)'
+                          : 'transparent',
+                        borderLeft: isCurrentMatch
+                          ? '3px solid #faad14'
+                          : isCurrentError
+                          ? '3px solid #ff4d4f'
+                          : isError
+                          ? '3px solid rgba(255,77,79,0.4)'
+                          : isWarning
+                          ? '3px solid rgba(229,192,123,0.4)'
+                          : '3px solid transparent',
+                      }}
+                    >
+                      <span style={{ color: '#5c6370', userSelect: 'none', minWidth: 36, textAlign: 'right', flexShrink: 0 }}>
+                        {idx + 1}
+                      </span>
+                      <span style={{ color, whiteSpace: 'pre-wrap', wordBreak: 'break-all', flex: 1 }}>
+                        {highlightText(line, searchKeyword)}
+                      </span>
+                    </div>
+                  )
+                })}
               </pre>
             </>
           )}
