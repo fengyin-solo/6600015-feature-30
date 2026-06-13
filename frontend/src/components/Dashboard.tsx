@@ -51,8 +51,7 @@ export default function Dashboard() {
   const [currentErrorIndex, setCurrentErrorIndex] = useState(0)
   const [currentMatchIndex, setCurrentMatchIndex] = useState(0)
   const logContainerRef = useRef<HTMLPreElement>(null)
-  const errorLineRefs = useRef<(HTMLDivElement | null)[]>([])
-  const matchedLineRefs = useRef<(HTMLDivElement | null)[]>([])
+  const lineRefs = useRef<Map<number, HTMLDivElement>>(new Map())
 
   const taskColumns = [
     { title: 'ID', dataIndex: 'id', key: 'id', width: 100 },
@@ -99,73 +98,95 @@ export default function Dashboard() {
       .filter(idx => idx !== -1)
   }, [store.selectedTask, searchKeyword])
 
-  const scrollToLine = (lineIndex: number) => {
-    if (logContainerRef.current && errorLineRefs.current[lineIndex]) {
-      errorLineRefs.current[lineIndex]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    }
+  const scrollToLineByGlobalIndex = (globalLineIndex: number) => {
+    const container = logContainerRef.current
+    const lineEl = lineRefs.current.get(globalLineIndex)
+    if (!container || !lineEl) return
+    const containerHeight = container.clientHeight
+    const lineTop = lineEl.offsetTop
+    const lineHeight = lineEl.offsetHeight
+    const targetScrollTop = lineTop - containerHeight / 2 + lineHeight / 2
+    container.scrollTo({ top: Math.max(0, targetScrollTop), behavior: 'smooth' })
   }
 
   const goToPrevError = () => {
     if (errorLineIndices.length === 0) return
-    const newIndex = currentErrorIndex === 0 ? errorLineIndices.length - 1 : currentErrorIndex - 1
-    setCurrentErrorIndex(newIndex)
-    scrollToLine(errorLineIndices[newIndex])
+    setCurrentErrorIndex(prev => prev === 0 ? errorLineIndices.length - 1 : prev - 1)
   }
 
   const goToNextError = () => {
     if (errorLineIndices.length === 0) return
-    const newIndex = currentErrorIndex === errorLineIndices.length - 1 ? 0 : currentErrorIndex + 1
-    setCurrentErrorIndex(newIndex)
-    scrollToLine(errorLineIndices[newIndex])
+    setCurrentErrorIndex(prev => prev === errorLineIndices.length - 1 ? 0 : prev + 1)
   }
 
   const goToFirstError = () => {
     if (errorLineIndices.length === 0) return
     setCurrentErrorIndex(0)
-    scrollToLine(errorLineIndices[0])
-  }
-
-  const scrollToMatchedLine = (lineIndex: number) => {
-    if (logContainerRef.current && matchedLineRefs.current[lineIndex]) {
-      matchedLineRefs.current[lineIndex]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    }
   }
 
   const goToPrevMatch = () => {
     if (matchedLineIndices.length === 0) return
-    const newIndex = currentMatchIndex === 0 ? matchedLineIndices.length - 1 : currentMatchIndex - 1
-    setCurrentMatchIndex(newIndex)
-    scrollToMatchedLine(newIndex)
+    setCurrentMatchIndex(prev => prev === 0 ? matchedLineIndices.length - 1 : prev - 1)
   }
 
   const goToNextMatch = () => {
     if (matchedLineIndices.length === 0) return
-    const newIndex = currentMatchIndex === matchedLineIndices.length - 1 ? 0 : currentMatchIndex + 1
-    setCurrentMatchIndex(newIndex)
-    scrollToMatchedLine(newIndex)
+    setCurrentMatchIndex(prev => prev === matchedLineIndices.length - 1 ? 0 : prev + 1)
   }
 
   const goToFirstMatch = () => {
     if (matchedLineIndices.length === 0) return
     setCurrentMatchIndex(0)
-    scrollToMatchedLine(0)
   }
 
   useEffect(() => {
-    if (searchKeyword.trim() && matchedLineIndices.length > 0) {
-      setCurrentMatchIndex(0)
+    lineRefs.current.clear()
+  }, [store.selectedTask])
+
+  useEffect(() => {
+    if (searchKeyword.trim()) {
+      if (currentMatchIndex >= matchedLineIndices.length) {
+        setCurrentMatchIndex(0)
+      }
     } else {
       setCurrentMatchIndex(0)
     }
-  }, [searchKeyword, matchedLineIndices])
+  }, [searchKeyword, matchedLineIndices.length])
+
+  useEffect(() => {
+    if (currentErrorIndex >= errorLineIndices.length && errorLineIndices.length > 0) {
+      setCurrentErrorIndex(0)
+    }
+  }, [errorLineIndices.length])
 
   useEffect(() => {
     if (drawerOpen && errorLineIndices.length > 0) {
-      setTimeout(() => {
-        scrollToLine(errorLineIndices[0])
-      }, 100)
+      const timer = setTimeout(() => {
+        scrollToLineByGlobalIndex(errorLineIndices[0])
+      }, 200)
+      return () => clearTimeout(timer)
     }
-  }, [drawerOpen, errorLineIndices])
+  }, [drawerOpen])
+
+  useEffect(() => {
+    if (errorLineIndices.length === 0) return
+    const targetLine = errorLineIndices[currentErrorIndex]
+    if (targetLine === undefined) return
+    const timer = setTimeout(() => {
+      scrollToLineByGlobalIndex(targetLine)
+    }, 50)
+    return () => clearTimeout(timer)
+  }, [currentErrorIndex, errorLineIndices])
+
+  useEffect(() => {
+    if (matchedLineIndices.length === 0 || !searchKeyword.trim()) return
+    const targetLine = matchedLineIndices[currentMatchIndex]
+    if (targetLine === undefined) return
+    const timer = setTimeout(() => {
+      scrollToLineByGlobalIndex(targetLine)
+    }, 50)
+    return () => clearTimeout(timer)
+  }, [currentMatchIndex, matchedLineIndices, searchKeyword])
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
@@ -350,17 +371,21 @@ export default function Dashboard() {
                   const color = LOG_LEVEL_COLORS[level] || '#abb2bf'
                   const isError = level === 'ERROR' || level === 'FATAL'
                   const isWarning = level === 'WARN'
-                  const isCurrentError = isError && errorLineIndices[currentErrorIndex] === idx
-                  const isMatched = searchKeyword.trim() && line.toLowerCase().includes(searchKeyword.trim().toLowerCase())
-                  const matchIdx = isMatched ? matchedLineIndices.indexOf(idx) : -1
-                  const isCurrentMatch = matchIdx !== -1 && currentMatchIndex === matchIdx
+                  const errorPos = errorLineIndices.indexOf(idx)
+                  const isCurrentError = errorPos !== -1 && currentErrorIndex === errorPos
+                  const isMatched = !!searchKeyword.trim() && line.toLowerCase().includes(searchKeyword.trim().toLowerCase())
+                  const matchPos = isMatched ? matchedLineIndices.indexOf(idx) : -1
+                  const isCurrentMatch = matchPos !== -1 && currentMatchIndex === matchPos
 
                   return (
                     <div
                       key={idx}
                       ref={(el) => {
-                        if (isError) errorLineRefs.current[errorLineIndices.indexOf(idx)] = el
-                        if (isMatched) matchedLineRefs.current[matchIdx] = el
+                        if (el) {
+                          lineRefs.current.set(idx, el)
+                        } else {
+                          lineRefs.current.delete(idx)
+                        }
                       }}
                       style={{
                         padding: '2px 12px',
